@@ -21,7 +21,9 @@ Then in the CNCjs workspace: **Manage Widgets** → enable **Custom** → set it
 The widget runs in an iframe inside the CNCjs Custom widget and uses two channels (see `atc/index.html`):
 
 - **socket.io to the CNCjs server**, authenticated with the session token. The token comes from the `?token=` query parameter, else `localStorage.cnc` (`state.session.token`), else the first `postMessage` from the parent. The widget emits `list` and reads `serialport:list` (polled every 3 s) to find the open port (`inuse`), and sends lines with `socket.emit('writeln', port, line)`. It also emits `open` for that already-open port, which only registers the socket with the controller so it receives `controller:state`; the current tool is `state.parserstate.tool`.
-- **`postMessage` with the parent CNCjs window**, in the shape `{ token, action: { type, payload } }`. The widget sends `connect` (ask which port the UI is using) and `resize` (with `scrollHeight`, so the iframe fits its content; call it after any layout change). CNCjs sends `change` with `payload.port`, which is preferred over the first open port when several are open.
+- **`postMessage` with the parent CNCjs window**, in the shape `{ token, action: { type, payload } }`. The widget sends `connect` (ask which port the UI is using). CNCjs sends `change` with `payload.port`, which is preferred over the first open port when several are open.
+
+Do not send the `resize` action. CNCjs broadcasts it to every Custom widget, so with two widgets on the workspace (one forked) each iframe gets the other's height and they flip back and forth. It is not needed either: for a same-origin iframe CNCjs watches the body with a `ResizeObserver` and fits the iframe to its content by itself.
 
 Send tool-change commands with `writeln`, not the `gcode` command: CNCjs intercepts `M6` on the `gcode` path, comments it out and pauses the feeder. `writeln` is the same path as typing in the CNCjs console, and it writes straight to the serial port with no flow control. Long sequences without `M6` (the probe widget) go through `socket.emit('command', port, 'gcode', text)` instead, because the feeder waits for each `ok`.
 

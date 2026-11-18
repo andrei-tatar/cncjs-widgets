@@ -114,18 +114,9 @@
 
   // ---- UI -----------------------------------------------------------------
 
-  function notifyResize() {
-    if (window.parent === window) return;
-    window.parent.postMessage({
-      token: token,
-      action: { type: 'resize', payload: { scrollHeight: document.body.scrollHeight } }
-    }, '*');
-  }
-
   function setMessage(text, isError) {
     els.message.textContent = text || '';
     els.message.className = isError ? 'error' : '';
-    notifyResize();
   }
 
   function render() {
@@ -144,7 +135,6 @@
       b.style.display = !known || action.when(tool >= FIRST_TOOL) ? '' : 'none';
     }
     els.run.disabled = !ready;
-    notifyResize();
   }
 
   function parseTool() {
@@ -166,7 +156,6 @@
     current = null;
     els.prompt.className = '';
     els.actions.style.display = '';
-    notifyResize();
   }
 
   els.actions.addEventListener('click', function (e) {

@@ -293,18 +293,9 @@
 
   // ---- UI -----------------------------------------------------------------
 
-  function notifyResize() {
-    if (window.parent === window) return;
-    window.parent.postMessage({
-      token: token,
-      action: { type: 'resize', payload: { scrollHeight: document.body.scrollHeight } }
-    }, '*');
-  }
-
   function setMessage(text, isError) {
     els.message.textContent = text || '';
     els.message.className = isError ? 'error' : '';
-    notifyResize();
   }
 
   function show(view) {
@@ -312,7 +303,6 @@
     for (var i = 0; i < views.length; i++) {
       views[i].className = views[i] === view ? 'view open' : 'view';
     }
-    notifyResize();
   }
 
   function render() {
@@ -328,7 +318,6 @@
     for (var i = 0; i < actionButtons.length; i++) actionButtons[i].disabled = !idle;
     els.start.disabled = !idle;
     els.stop.disabled = !ready;
-    notifyResize();
   }
 
   function openConfirm(key) {
