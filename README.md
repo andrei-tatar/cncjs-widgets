@@ -11,6 +11,8 @@ Two buttons for a tool changer. Each asks for a tool number, then sends:
 | Init tool   | `M61 Q<tool>` then `$LocalFS/Run=atc_measure.nc`    |
 | Switch tool | `T<tool> M6`                                        |
 
+The widget shows the controller's current tool as `T<n>` and offers only the button that applies: **Init tool** while no tool is selected (`T0`), **Switch tool** once one is. Until the controller has reported its tool, both are shown.
+
 ### Install
 
 1. Mount this repository in CNCjs, either on the command line:

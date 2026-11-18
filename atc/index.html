@@ -30,6 +30,8 @@
   #status { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; color: #666; }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: #c33; flex: none; }
   #dot.ok { background: #3a3; }
+  #statusText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #currentTool { flex: none; font-weight: bold; color: #222; }
 
   #actions { display: flex; gap: 8px; }
   #actions button { flex: 1; }
@@ -46,21 +48,12 @@
     border-radius: 3px;
   }
   #tool:focus { outline: none; border-color: #0b7dda; }
-  #preview {
-    margin: 8px 0 0;
-    padding: 6px 8px;
-    background: #f5f5f5;
-    border-radius: 3px;
-    font: 12px/1.4 Menlo, Consolas, monospace;
-    white-space: pre-wrap;
-    color: #555;
-  }
   #message { min-height: 18px; margin-top: 8px; color: #666; }
   #message.error { color: #c33; }
 </style>
 </head>
 <body>
-  <div id="status"><span id="dot"></span><span id="statusText">Connecting…</span></div>
+  <div id="status"><span id="dot"></span><span id="statusText">Connecting…</span><span id="currentTool" title="Current tool"></span></div>
 
   <div id="actions">
     <button type="button" data-action="init" disabled>Init tool</button>
@@ -74,7 +67,6 @@
       <button type="submit" class="primary" id="run">Run</button>
       <button type="button" id="cancel">Cancel</button>
     </div>
-    <pre id="preview"></pre>
   </form>
 
   <div id="message"></div>
@@ -84,23 +76,31 @@
 (function () {
   'use strict';
 
+  // Tool numbers below this mean "no tool selected" (T0).
+  var FIRST_TOOL = 1;
+
   // Each action maps a tool number to the lines sent to the controller.
+  // "when" decides whether its button is shown, given whether a tool is
+  // currently selected. While the current tool is unknown, all are shown.
   var ACTIONS = {
     init: {
       label: 'Init tool — which tool is in the spindle?',
+      when: function (selected) { return !selected; },
       lines: function (t) { return ['M61 Q' + t, '$LocalFS/Run=atc_measure.nc']; }
     },
     switch: {
       label: 'Switch to tool',
+      when: function (selected) { return selected; },
       lines: function (t) { return ['T' + t + ' M6']; }
     }
   };
 
   var $ = function (id) { return document.getElementById(id); };
   var els = {
-    dot: $('dot'), statusText: $('statusText'), actions: $('actions'),
+    dot: $('dot'), statusText: $('statusText'), currentTool: $('currentTool'),
+    actions: $('actions'),
     prompt: $('prompt'), promptLabel: $('promptLabel'), tool: $('tool'),
-    run: $('run'), cancel: $('cancel'), preview: $('preview'), message: $('message')
+    run: $('run'), cancel: $('cancel'), message: $('message')
   };
   var actionButtons = els.actions.querySelectorAll('button');
 
@@ -109,6 +109,8 @@
   var port = '';          // serial port currently open in CNCjs
   var hintedPort = '';    // port reported by the CNCjs parent window
   var current = null;     // key of the action being prompted for
+  var watchedPort = '';   // port whose controller state this socket receives
+  var tool = null;        // current tool reported by the controller, null if unknown
 
   // ---- UI -----------------------------------------------------------------
 
@@ -133,7 +135,14 @@
     els.statusText.textContent = !connected ? 'Not connected to CNCjs'
       : !port ? 'No serial port open'
       : port;
-    for (var i = 0; i < actionButtons.length; i++) actionButtons[i].disabled = !ready;
+    var known = ready && tool !== null;
+    els.currentTool.textContent = known ? 'T' + tool : '';
+    for (var i = 0; i < actionButtons.length; i++) {
+      var b = actionButtons[i];
+      var action = ACTIONS[b.getAttribute('data-action')];
+      b.disabled = !ready;
+      b.style.display = !known || action.when(tool >= FIRST_TOOL) ? '' : 'none';
+    }
     els.run.disabled = !ready;
     notifyResize();
   }
@@ -143,16 +152,10 @@
     return /^\d+$/.test(v) ? parseInt(v, 10) : null;
   }
 
-  function updatePreview() {
-    var t = parseTool();
-    els.preview.textContent = ACTIONS[current].lines(t === null ? '?' : t).join('\n');
-  }
-
   function openPrompt(key) {
     current = key;
     els.promptLabel.textContent = ACTIONS[key].label;
     els.tool.value = '';
-    updatePreview();
     els.actions.style.display = 'none';
     els.prompt.className = 'open';
     setMessage('');
@@ -171,7 +174,6 @@
     if (key) openPrompt(key);
   });
   els.cancel.addEventListener('click', closePrompt);
-  els.tool.addEventListener('input', updatePreview);
   els.tool.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closePrompt();
   });
@@ -210,6 +212,16 @@
     }
   }
 
+  // The current tool is the T word of the parser state ($G report).
+  function onControllerState(state) {
+    var ps = (state && state.parserstate) || {};
+    var t = parseInt(ps.tool, 10);
+    t = isNaN(t) ? null : t;
+    if (t === tool) return;
+    tool = t;
+    render();
+  }
+
   function refreshPorts() {
     if (socket && socket.connected) socket.emit('list');
   }
@@ -230,7 +242,11 @@
         window.parent.postMessage({ token: token, action: { type: 'connect' } }, '*');
       }
     });
-    socket.on('disconnect', render);
+    socket.on('disconnect', function () {
+      watchedPort = '';
+      tool = null;
+      render();
+    });
     socket.on('error', function (err) {
       setMessage('CNCjs connection error: ' + (err && err.message ? err.message : err), true);
       render();
@@ -239,8 +255,18 @@
       var open = (ports || []).filter(function (p) { return p.inuse; })
                               .map(function (p) { return p.port; });
       port = open.indexOf(hintedPort) >= 0 ? hintedPort : (open[0] || '');
+      if (port !== watchedPort) {
+        tool = null;
+        watchedPort = port;
+        // "open" on a port that is already open only registers this socket
+        // with its controller, so that CNCjs sends us the controller state.
+        if (port) socket.emit('open', port);
+      }
       render();
     });
+    // CNCjs >= 1.9.16 emits "controller:state"; older versions "Grbl:state".
+    socket.on('controller:state', function (type, state) { onControllerState(state); });
+    socket.on('Grbl:state', onControllerState);
 
     setInterval(refreshPorts, 3000);
   }
