@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probe</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 10px;
+    font: 13px/1.4 "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #222;
+    background: #fff;
+  }
+  button, input { font: inherit; }
+  button {
+    padding: 6px 12px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    background: linear-gradient(#fff, #e6e6e6);
+    color: #222;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #e6e6e6; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { border-color: #0067b8; background: #0b7dda; color: #fff; }
+  button.primary:hover:not(:disabled) { background: #0067b8; }
+  button.danger { border-color: #a22; background: #c33; color: #fff; }
+  button.danger:hover:not(:disabled) { background: #a22; }
+  input {
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    min-width: 0;
+  }
+  input:focus { outline: none; border-color: #0b7dda; }
+
+  #status { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; color: #666; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #c33; flex: none; }
+  #dot.ok { background: #3a3; }
+  #statusText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #pin { flex: none; padding: 0 6px; border-radius: 3px; background: #e90; color: #fff; display: none; }
+  #pin.on { display: inline; }
+  #machine { flex: none; font-weight: bold; color: #222; }
+
+  .view { display: none; }
+  .view.open { display: block; }
+
+  #toolRow { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  #toolRow label { flex: 1; }
+  #toolDia { width: 70px; text-align: right; }
+
+  /* Laid out like the stock seen from above: back of the machine at the top. */
+  #grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  #grid button { padding: 10px 4px; }
+  #grid .stock {
+    grid-column: 2; grid-row: 2;
+  }
+
+  #footer { display: flex; gap: 8px; margin-top: 10px; }
+  #footer button { flex: 1; }
+
+  #confirm p { margin: 0 0 6px; }
+  #confirmTitle { font-weight: bold; }
+  #confirm ol { margin: 0 0 8px; padding-left: 18px; }
+  .buttons { display: flex; gap: 8px; }
+  .buttons button { flex: 1; }
+
+  #fields .field { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  #fields label { flex: 1; }
+  #fields input { width: 70px; text-align: right; }
+  #fields .unit { width: 46px; color: #666; }
+  #settings h2 { margin: 0 0 8px; font-size: 13px; }
+
+  #message { min-height: 18px; margin-top: 8px; color: #666; }
+  #message.error { color: #c33; }
+</style>
+</head>
+<body>
+  <div id="status">
+    <span id="dot"></span><span id="statusText">Connecting…</span>
+    <span id="pin" title="The probe input is active: the tool is touching the plate">Probe contact</span>
+    <span id="machine" title="Controller state"></span>
+  </div>
+
+  <div id="main" class="view open">
+    <div id="toolRow">
+      <label for="toolDia">Tool diameter (mm)</label>
+      <input id="toolDia" type="text" inputmode="decimal">
+    </div>
+    <div id="grid">
+      <button type="button" data-action="bl" style="grid-column:1;grid-row:1">Back left</button>
+      <button type="button" data-action="br" style="grid-column:3;grid-row:1">Back right</button>
+      <button type="button" data-action="z" class="stock">Z only</button>
+      <button type="button" data-action="fl" class="primary" style="grid-column:1;grid-row:3">Front left</button>
+      <button type="button" data-action="fr" style="grid-column:3;grid-row:3">Front right</button>
+    </div>
+    <div id="footer">
+      <button type="button" id="openSettings">Settings…</button>
+      <button type="button" id="stop" class="danger" title="Soft-reset the controller" disabled>Stop</button>
+    </div>
+  </div>
+
+  <div id="confirm" class="view">
+    <p id="confirmTitle"></p>
+    <ol id="confirmSteps"></ol>
+    <div class="buttons">
+      <button type="button" class="primary" id="start">Start probing</button>
+      <button type="button" id="cancel">Cancel</button>
+    </div>
+  </div>
+
+  <form id="settings" class="view" autocomplete="off">
+    <h2>Probe settings</h2>
+    <div id="fields"></div>
+    <div class="buttons">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="defaults">Defaults</button>
+      <button type="button" id="closeSettings">Cancel</button>
+    </div>
+  </form>
+
+  <div id="message"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var STORAGE_KEY = 'cncjs-widgets.probe';
+
+  // Settings shown in the settings panel. Defaults are the Maker Store XYZ
+  // Touch Probe (TOOL-TP-V2), from its drawing: a 50 x 50 mm plate, 5 mm thick
+  // over the stock, with a 10 mm wide lip on two sides that hangs 5 mm below
+  // the stock surface (10 mm tall outer faces).
+  var FIELDS = [
+    { key: 'thickness', label: 'Plate thickness (Z)', unit: 'mm', def: 5 },
+    { key: 'xyOffset', label: 'Lip width (X/Y offset)', unit: 'mm', def: 10 },
+    { key: 'plateSize', label: 'Plate size', unit: 'mm', def: 50 },
+    { key: 'sideDepth', label: 'Side probe depth below plate top', unit: 'mm', def: 6 },
+    { key: 'clearance', label: 'Side clearance outside plate', unit: 'mm', def: 10 },
+    { key: 'zDistance', label: 'Max Z probe travel', unit: 'mm', def: 20 },
+    { key: 'retract', label: 'Retract after contact', unit: 'mm', def: 2 },
+    { key: 'fastFeed', label: 'Fast probe feed', unit: 'mm/min', def: 100 },
+    { key: 'slowFeed', label: 'Slow probe feed', unit: 'mm/min', def: 25 }
+  ];
+  var DEFAULT_TOOL_DIA = 6;
+
+  // sx/sy: direction from the corner into the stock (+1 = stock extends
+  // towards positive X/Y). Corners without sx are Z only.
+  var ACTIONS = {
+    z:  { title: 'Z only — top of the material' },
+    fl: { title: 'Front-left corner — X, Y and Z', sx: 1, sy: 1 },
+    fr: { title: 'Front-right corner — X, Y and Z', sx: -1, sy: 1 },
+    bl: { title: 'Back-left corner — X, Y and Z', sx: 1, sy: -1 },
+    br: { title: 'Back-right corner — X, Y and Z', sx: -1, sy: -1 }
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var els = {
+    dot: $('dot'), statusText: $('statusText'), pin: $('pin'), machine: $('machine'),
+    main: $('main'), confirm: $('confirm'), settings: $('settings'),
+    toolDia: $('toolDia'), grid: $('grid'), stop: $('stop'),
+    confirmTitle: $('confirmTitle'), confirmSteps: $('confirmSteps'),
+    start: $('start'), cancel: $('cancel'),
+    fields: $('fields'), message: $('message')
+  };
+  var actionButtons = els.grid.querySelectorAll('button');
+
+  var socket = null;
+  var token = '';
+  var port = '';          // serial port currently open in CNCjs
+  var hintedPort = '';    // port reported by the CNCjs parent window
+  var watchedPort = '';   // port whose controller state this socket receives
+  var current = null;     // key of the action awaiting confirmation
+  var activeState = '';   // controller state (Idle, Run, Alarm, ...), '' if unknown
+  var probePin = false;   // probe input currently active
+  var modal = {};         // controller modal state (units, distance)
+  var settings = loadSettings();
+
+  // ---- Settings -----------------------------------------------------------
+
+  function loadSettings() {
+    var saved = {};
+    try {
+      saved = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}') || {};
+    } catch (err) {
+      saved = {};
+    }
+    var s = { toolDia: positive(saved.toolDia) || DEFAULT_TOOL_DIA };
+    for (var i = 0; i < FIELDS.length; i++) {
+      var f = FIELDS[i];
+      s[f.key] = positive(saved[f.key]) || f.def;
+    }
+    return s;
+  }
+
+  function saveSettings() {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    } catch (err) { /* storage unavailable: settings last until reload */ }
+  }
+
+  // Parses a positive number, accepting a decimal comma. Returns null if invalid.
+  function positive(v) {
+    var s = String(v == null ? '' : v).trim().replace(',', '.');
+    if (!/^\d*\.?\d+$/.test(s)) return null;
+    var n = parseFloat(s);
+    return n > 0 ? n : null;
+  }
+
+  function buildFields() {
+    for (var i = 0; i < FIELDS.length; i++) {
+      var f = FIELDS[i];
+      var row = document.createElement('div');
+      row.className = 'field';
+      var label = document.createElement('label');
+      label.htmlFor = 'f_' + f.key;
+      label.textContent = f.label;
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'decimal';
+      input.id = 'f_' + f.key;
+      var unit = document.createElement('span');
+      unit.className = 'unit';
+      unit.textContent = f.unit;
+      row.appendChild(label);
+      row.appendChild(input);
+      row.appendChild(unit);
+      els.fields.appendChild(row);
+    }
+  }
+
+  function fillFields(values) {
+    for (var i = 0; i < FIELDS.length; i++) {
+      $('f_' + FIELDS[i].key).value = values ? values[FIELDS[i].key] : FIELDS[i].def;
+    }
+  }
+
+  // ---- G-code -------------------------------------------------------------
+
+  function fmt(n) {
+    return String(Math.round(n * 1000) / 1000);
+  }
+
+  // Probes towards "dir" along "axis" (fast, back off, slow), then sets the
+  // work coordinate of that axis at the contact point to "value".
+  function touch(axis, dir, distance, value, s) {
+    return [
+      'G38.2 ' + axis + fmt(dir * distance) + ' F' + fmt(s.fastFeed),
+      'G0 ' + axis + fmt(-dir * s.retract),
+      'G38.2 ' + axis + fmt(dir * (s.retract + 1)) + ' F' + fmt(s.slowFeed),
+      'G10 L20 P0 ' + axis + fmt(value)
+    ];
+  }
+
+  // Probes one outer face of the lip. Starts and ends "retract" above the
+  // plate; "into" is the direction from the corner into the stock.
+  function side(axis, into, s) {
+    var r = s.toolDia / 2;
+    var out = s.plateSize / 2 + r + s.clearance;   // from plate centre to clear of the lip
+    var down = s.retract + s.sideDepth;
+    return [
+      'G0 ' + axis + fmt(-into * out),
+      'G0 Z' + fmt(-down)
+    ].concat(
+      // At contact the tool centre is a lip width plus a tool radius outside the corner.
+      touch(axis, into, s.clearance + 5, -into * (s.xyOffset + r), s),
+      [
+        'G0 ' + axis + fmt(-into * s.retract),
+        'G0 Z' + fmt(down),
+        // Now that this axis is zeroed, go back over the centre of the plate.
+        'G90 G0 ' + axis + fmt(into * (s.plateSize / 2 - s.xyOffset)),
+        'G91'
+      ]
+    );
+  }
+
+  function buildLines(action, s) {
+    var lines = ['G21 G91'].concat(
+      touch('Z', -1, s.zDistance, s.thickness, s),
+      ['G0 Z' + fmt(s.retract)]
+    );
+    if (action.sx) {
+      lines = lines.concat(side('X', action.sx, s), side('Y', action.sy, s));
+    }
+    // Put back the distance mode and units that were active before.
+    lines.push(modal.distance === 'G91' ? 'G91' : 'G90');
+    if (modal.units === 'G20') lines.push('G20');
+    return lines;
+  }
+
+  // ---- UI -----------------------------------------------------------------
+
+  function notifyResize() {
+    if (window.parent === window) return;
+    window.parent.postMessage({
+      token: token,
+      action: { type: 'resize', payload: { scrollHeight: document.body.scrollHeight } }
+    }, '*');
+  }
+
+  function setMessage(text, isError) {
+    els.message.textContent = text || '';
+    els.message.className = isError ? 'error' : '';
+    notifyResize();
+  }
+
+  function show(view) {
+    var views = [els.main, els.confirm, els.settings];
+    for (var i = 0; i < views.length; i++) {
+      views[i].className = views[i] === view ? 'view open' : 'view';
+    }
+    notifyResize();
+  }
+
+  function render() {
+    var connected = !!(socket && socket.connected);
+    var ready = connected && !!port;
+    var idle = ready && activeState === 'Idle';
+    els.dot.className = ready ? 'ok' : '';
+    els.statusText.textContent = !connected ? 'Not connected to CNCjs'
+      : !port ? 'No serial port open'
+      : port;
+    els.machine.textContent = ready ? activeState : '';
+    els.pin.className = ready && probePin ? 'on' : '';
+    for (var i = 0; i < actionButtons.length; i++) actionButtons[i].disabled = !idle;
+    els.start.disabled = !idle;
+    els.stop.disabled = !ready;
+    notifyResize();
+  }
+
+  function openConfirm(key) {
+    var dia = positive(els.toolDia.value);
+    if (dia === null) {
+      setMessage('Enter the tool diameter in mm.', true);
+      els.toolDia.focus();
+      return;
+    }
+    settings.toolDia = dia;
+    saveSettings();
+
+    var action = ACTIONS[key];
+    var steps = action.sx ? [
+      'Hook the plate over the corner, both lips tight against the sides of the stock.',
+      'Clip the lead to the tool.',
+      'Jog the tool to about 5 mm above the centre of the plate.',
+      'Keep ' + fmt(settings.clearance + dia) + ' mm clear outside both lips, down to '
+        + fmt(settings.sideDepth) + ' mm below the top of the plate.'
+    ] : [
+      'Lay the plate flat on the material.',
+      'Clip the lead to the tool.',
+      'Jog the tool to about 5 mm above the flat of the plate.'
+    ];
+    current = key;
+    els.confirmTitle.textContent = action.title + ' (' + fmt(dia) + ' mm tool)';
+    els.confirmSteps.innerHTML = '';
+    for (var i = 0; i < steps.length; i++) {
+      var li = document.createElement('li');
+      li.textContent = steps[i];
+      els.confirmSteps.appendChild(li);
+    }
+    setMessage('');
+    show(els.confirm);
+  }
+
+  function closeConfirm() {
+    current = null;
+    show(els.main);
+  }
+
+  els.grid.addEventListener('click', function (e) {
+    var key = e.target.getAttribute('data-action');
+    if (key) openConfirm(key);
+  });
+  els.cancel.addEventListener('click', closeConfirm);
+
+  els.start.addEventListener('click', function () {
+    if (!socket || !socket.connected || !port) {
+      setMessage('Not connected — nothing was sent.', true);
+      return;
+    }
+    if (activeState !== 'Idle') {
+      setMessage('The controller is not idle — nothing was sent.', true);
+      return;
+    }
+    if (probePin) {
+      setMessage('The probe input is already active — lift the tool off the plate or check the wiring.', true);
+      return;
+    }
+    // Sent through the CNCjs feeder ("gcode" command), which waits for each
+    // "ok" before sending the next line, so a long sequence cannot overflow
+    // the controller's receive buffer.
+    var action = ACTIONS[current];
+    socket.emit('command', port, 'gcode', buildLines(action, settings).join('\n'));
+    closeConfirm();
+    setMessage('Probing: ' + action.title);
+  });
+
+  els.stop.addEventListener('click', function () {
+    if (!socket || !socket.connected || !port) return;
+    // Soft reset: stops motion and empties the CNCjs feeder queue.
+    socket.emit('command', port, 'reset');
+    setMessage('Stopped — the controller was reset.', true);
+  });
+
+  els.toolDia.addEventListener('change', function () {
+    var dia = positive(els.toolDia.value);
+    if (dia === null) return;
+    settings.toolDia = dia;
+    saveSettings();
+  });
+
+  $('openSettings').addEventListener('click', function () {
+    fillFields(settings);
+    setMessage('');
+    show(els.settings);
+  });
+  $('closeSettings').addEventListener('click', function () {
+    setMessage('');
+    show(els.main);
+  });
+  $('defaults').addEventListener('click', function () { fillFields(null); });
+
+  els.settings.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var next = {};
+    for (var i = 0; i < FIELDS.length; i++) {
+      var f = FIELDS[i];
+      var input = $('f_' + f.key);
+      var n = positive(input.value);
+      if (n === null) {
+        setMessage(f.label + ': enter a number greater than 0.', true);
+        input.focus();
+        return;
+      }
+      next[f.key] = n;
+    }
+    if (next.slowFeed > next.fastFeed) {
+      setMessage('The slow feed must not be higher than the fast feed.', true);
+      return;
+    }
+    for (var key in next) settings[key] = next[key];
+    saveSettings();
+    show(els.main);
+    setMessage('Settings saved.');
+  });
+
+  // ---- CNCjs connection ---------------------------------------------------
+
+  function findToken() {
+    var m = /[?&]token=([^&]+)/.exec(window.location.search);
+    if (m) return decodeURIComponent(m[1]);
+    try {
+      var cnc = JSON.parse(window.localStorage.getItem('cnc') || '{}');
+      return (cnc.state && cnc.state.session && cnc.state.session.token) || '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function onControllerState(state) {
+    var status = (state && state.status) || {};
+    var ps = (state && state.parserstate) || {};
+    var pins = status.pinState;
+    var pin = typeof pins === 'string' ? pins.indexOf('P') >= 0 : !!(pins && pins.P);
+    var active = status.activeState || '';
+    modal = ps.modal || {};
+    if (active === activeState && pin === probePin) return;
+    if (active === 'Alarm' && activeState !== 'Alarm') {
+      setMessage('Alarm — if a probe move found no contact, nothing was zeroed after it.', true);
+    }
+    activeState = active;
+    probePin = pin;
+    render();
+  }
+
+  function refreshPorts() {
+    if (socket && socket.connected) socket.emit('list');
+  }
+
+  function connect() {
+    if (socket || !token) return;
+    if (typeof io === 'undefined') {
+      setMessage('socket.io client not found — serve this widget from CNCjs (see README).', true);
+      return;
+    }
+    socket = io.connect('', { path: '/socket.io', query: { token: token } });
+
+    socket.on('connect', function () {
+      render();
+      refreshPorts();
+      // Ask the CNCjs window which port it is using.
+      if (window.parent !== window) {
+        window.parent.postMessage({ token: token, action: { type: 'connect' } }, '*');
+      }
+    });
+    socket.on('disconnect', function () {
+      watchedPort = '';
+      activeState = '';
+      probePin = false;
+      render();
+    });
+    socket.on('error', function (err) {
+      setMessage('CNCjs connection error: ' + (err && err.message ? err.message : err), true);
+      render();
+    });
+    socket.on('serialport:list', function (ports) {
+      var open = (ports || []).filter(function (p) { return p.inuse; })
+                              .map(function (p) { return p.port; });
+      port = open.indexOf(hintedPort) >= 0 ? hintedPort : (open[0] || '');
+      if (port !== watchedPort) {
+        activeState = '';
+        probePin = false;
+        watchedPort = port;
+        // "open" on a port that is already open only registers this socket
+        // with its controller, so that CNCjs sends us the controller state.
+        if (port) socket.emit('open', port);
+      }
+      render();
+    });
+    // CNCjs >= 1.9.16 emits "controller:state"; older versions "Grbl:state".
+    socket.on('controller:state', function (type, state) { onControllerState(state); });
+    socket.on('Grbl:state', onControllerState);
+
+    setInterval(refreshPorts, 3000);
+  }
+
+  // CNCjs posts { token, action: { type: 'change', payload: { port, ... } } }
+  window.addEventListener('message', function (e) {
+    var data = e.data || {};
+    var action = data.action || {};
+    if (!token && data.token) token = data.token;
+    if (action.type === 'change' && action.payload) {
+      hintedPort = action.payload.port || '';
+      refreshPorts();
+    }
+    connect();
+  });
+
+  buildFields();
+  els.toolDia.value = settings.toolDia;
+  token = findToken();
+  render();
+  connect();
+})();
+</script>
+</body>
+</html>
