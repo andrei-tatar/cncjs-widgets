@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATC</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 10px;
+    font: 13px/1.4 "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #222;
+    background: #fff;
+  }
+  button, input { font: inherit; }
+  button {
+    padding: 6px 12px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    background: linear-gradient(#fff, #e6e6e6);
+    color: #222;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #e6e6e6; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { border-color: #0067b8; background: #0b7dda; color: #fff; }
+  button.primary:hover:not(:disabled) { background: #0067b8; }
+
+  #status { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; color: #666; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #c33; flex: none; }
+  #dot.ok { background: #3a3; }
+
+  #actions { display: flex; gap: 8px; }
+  #actions button { flex: 1; }
+
+  #prompt { display: none; }
+  #prompt.open { display: block; }
+  #prompt label { display: block; margin-bottom: 6px; font-weight: bold; }
+  #prompt .row { display: flex; gap: 8px; }
+  #tool {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+  }
+  #tool:focus { outline: none; border-color: #0b7dda; }
+  #preview {
+    margin: 8px 0 0;
+    padding: 6px 8px;
+    background: #f5f5f5;
+    border-radius: 3px;
+    font: 12px/1.4 Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    color: #555;
+  }
+  #message { min-height: 18px; margin-top: 8px; color: #666; }
+  #message.error { color: #c33; }
+</style>
+</head>
+<body>
+  <div id="status"><span id="dot"></span><span id="statusText">Connecting…</span></div>
+
+  <div id="actions">
+    <button type="button" data-action="init" disabled>Init tool</button>
+    <button type="button" data-action="switch" disabled>Switch tool</button>
+  </div>
+
+  <form id="prompt" autocomplete="off">
+    <label id="promptLabel" for="tool"></label>
+    <div class="row">
+      <input id="tool" type="text" inputmode="numeric" placeholder="Tool number">
+      <button type="submit" class="primary" id="run">Run</button>
+      <button type="button" id="cancel">Cancel</button>
+    </div>
+    <pre id="preview"></pre>
+  </form>
+
+  <div id="message"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // Each action maps a tool number to the lines sent to the controller.
+  var ACTIONS = {
+    init: {
+      label: 'Init tool — which tool is in the spindle?',
+      lines: function (t) { return ['M61 Q' + t, '$LocalFS/Run=atc_measure.nc']; }
+    },
+    switch: {
+      label: 'Switch to tool',
+      lines: function (t) { return ['T' + t + ' M6']; }
+    }
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var els = {
+    dot: $('dot'), statusText: $('statusText'), actions: $('actions'),
+    prompt: $('prompt'), promptLabel: $('promptLabel'), tool: $('tool'),
+    run: $('run'), cancel: $('cancel'), preview: $('preview'), message: $('message')
+  };
+  var actionButtons = els.actions.querySelectorAll('button');
+
+  var socket = null;
+  var token = '';
+  var port = '';          // serial port currently open in CNCjs
+  var hintedPort = '';    // port reported by the CNCjs parent window
+  var current = null;     // key of the action being prompted for
+
+  // ---- UI -----------------------------------------------------------------
+
+  function notifyResize() {
+    if (window.parent === window) return;
+    window.parent.postMessage({
+      token: token,
+      action: { type: 'resize', payload: { scrollHeight: document.body.scrollHeight } }
+    }, '*');
+  }
+
+  function setMessage(text, isError) {
+    els.message.textContent = text || '';
+    els.message.className = isError ? 'error' : '';
+    notifyResize();
+  }
+
+  function render() {
+    var connected = !!(socket && socket.connected);
+    var ready = connected && !!port;
+    els.dot.className = ready ? 'ok' : '';
+    els.statusText.textContent = !connected ? 'Not connected to CNCjs'
+      : !port ? 'No serial port open'
+      : port;
+    for (var i = 0; i < actionButtons.length; i++) actionButtons[i].disabled = !ready;
+    els.run.disabled = !ready;
+    notifyResize();
+  }
+
+  function parseTool() {
+    var v = els.tool.value.trim();
+    return /^\d+$/.test(v) ? parseInt(v, 10) : null;
+  }
+
+  function updatePreview() {
+    var t = parseTool();
+    els.preview.textContent = ACTIONS[current].lines(t === null ? '?' : t).join('\n');
+  }
+
+  function openPrompt(key) {
+    current = key;
+    els.promptLabel.textContent = ACTIONS[key].label;
+    els.tool.value = '';
+    updatePreview();
+    els.actions.style.display = 'none';
+    els.prompt.className = 'open';
+    setMessage('');
+    els.tool.focus();
+  }
+
+  function closePrompt() {
+    current = null;
+    els.prompt.className = '';
+    els.actions.style.display = '';
+    notifyResize();
+  }
+
+  els.actions.addEventListener('click', function (e) {
+    var key = e.target.getAttribute('data-action');
+    if (key) openPrompt(key);
+  });
+  els.cancel.addEventListener('click', closePrompt);
+  els.tool.addEventListener('input', updatePreview);
+  els.tool.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closePrompt();
+  });
+
+  els.prompt.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var t = parseTool();
+    if (t === null) {
+      setMessage('Enter a whole tool number.', true);
+      els.tool.focus();
+      return;
+    }
+    if (!socket || !socket.connected || !port) {
+      setMessage('Not connected — nothing was sent.', true);
+      return;
+    }
+    // Sent with "writeln", the same path as typing in the CNCjs console.
+    // The "gcode" command is avoided on purpose: CNCjs intercepts M6 there,
+    // comments it out and pauses the feeder.
+    var lines = ACTIONS[current].lines(t);
+    for (var i = 0; i < lines.length; i++) socket.emit('writeln', port, lines[i]);
+    closePrompt();
+    setMessage('Sent: ' + lines.join(' ; '));
+  });
+
+  // ---- CNCjs connection ---------------------------------------------------
+
+  function findToken() {
+    var m = /[?&]token=([^&]+)/.exec(window.location.search);
+    if (m) return decodeURIComponent(m[1]);
+    try {
+      var cnc = JSON.parse(window.localStorage.getItem('cnc') || '{}');
+      return (cnc.state && cnc.state.session && cnc.state.session.token) || '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function refreshPorts() {
+    if (socket && socket.connected) socket.emit('list');
+  }
+
+  function connect() {
+    if (socket || !token) return;
+    if (typeof io === 'undefined') {
+      setMessage('socket.io client not found — serve this widget from CNCjs (see README).', true);
+      return;
+    }
+    socket = io.connect('', { path: '/socket.io', query: { token: token } });
+
+    socket.on('connect', function () {
+      render();
+      refreshPorts();
+      // Ask the CNCjs window which port it is using.
+      if (window.parent !== window) {
+        window.parent.postMessage({ token: token, action: { type: 'connect' } }, '*');
+      }
+    });
+    socket.on('disconnect', render);
+    socket.on('error', function (err) {
+      setMessage('CNCjs connection error: ' + (err && err.message ? err.message : err), true);
+      render();
+    });
+    socket.on('serialport:list', function (ports) {
+      var open = (ports || []).filter(function (p) { return p.inuse; })
+                              .map(function (p) { return p.port; });
+      port = open.indexOf(hintedPort) >= 0 ? hintedPort : (open[0] || '');
+      render();
+    });
+
+    setInterval(refreshPorts, 3000);
+  }
+
+  // CNCjs posts { token, action: { type: 'change', payload: { port, ... } } }
+  window.addEventListener('message', function (e) {
+    var data = e.data || {};
+    var action = data.action || {};
+    if (!token && data.token) token = data.token;
+    if (action.type === 'change' && action.payload) {
+      hintedPort = action.payload.port || '';
+      refreshPorts();
+    }
+    connect();
+  });
+
+  token = findToken();
+  render();
+  connect();
+})();
+</script>
+</body>
+</html>
